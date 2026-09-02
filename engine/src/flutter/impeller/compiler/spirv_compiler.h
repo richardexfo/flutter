@@ -40,6 +40,12 @@ struct SPIRVCompilerOptions {
   shaderc_optimization_level optimization_level =
       shaderc_optimization_level::shaderc_optimization_level_performance;
 
+  // Runs the SPIR-V performance passes with block merging left out, instead of
+  // letting shaderc apply `optimization_level`. Block merging produces a loop
+  // form that some GLES drivers cannot compile; see
+  // RegisterPerformancePassesWithoutBlockMerging in spirv_compiler.cc.
+  bool optimize_without_block_merging = false;
+
   //----------------------------------------------------------------------------
   // Target Options.
   //----------------------------------------------------------------------------
@@ -63,7 +69,8 @@ class SPIRVCompiler {
 
   std::shared_ptr<fml::Mapping> CompileToSPV(
       std::stringstream& error_stream,
-      const shaderc::CompileOptions& spirv_options) const;
+      const shaderc::CompileOptions& spirv_options,
+      bool optimize_without_block_merging) const;
 
  private:
   SourceOptions options_;

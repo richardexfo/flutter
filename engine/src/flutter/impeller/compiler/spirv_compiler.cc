@@ -5,13 +5,79 @@
 #include "impeller/compiler/spirv_compiler.h"
 
 #include <array>
+#include <vector>
 
 #include "impeller/compiler/logger.h"
 #include "impeller/compiler/types.h"
 #include "impeller/compiler/utilities.h"
+#include "spirv-tools/optimizer.hpp"
 
 namespace impeller {
 namespace compiler {
+
+namespace {
+
+// spirv-opt's block merge pass folds a loop's continue block into its
+// predecessor. SPIRV-Cross can then no longer emit the loop's increment in the
+// `for` header and falls back to `for (i = 0; i < n; ) { ...; i++; continue; }`.
+// Vivante's shader compiler segfaults linking that form, so GLES shaders run
+// the performance passes with block merging left out.
+// See https://github.com/flutter/flutter/issues/167850.
+//
+// Dropping optimization altogether is not an option: external texture shaders
+// rely on exhaustive inlining so that the `SAMPLER_EXTERNAL_OES_` type remap in
+// compiler.cc has no `sampler2D` function parameters left to disagree with.
+//
+// This mirrors spvtools::Optimizer::RegisterPerformancePasses() minus its two
+// CreateBlockMergePass() entries; keep it in sync when SPIRV-Tools rolls. The
+// GLESLoopsKeepTheirIncrementClause compiler unit test guards the outcome.
+void RegisterPerformancePassesWithoutBlockMerging(
+    spvtools::Optimizer& optimizer) {
+  optimizer.RegisterPass(spvtools::CreateWrapOpKillPass())
+      .RegisterPass(spvtools::CreateDeadBranchElimPass())
+      .RegisterPass(spvtools::CreateMergeReturnPass())
+      .RegisterPass(spvtools::CreateInlineExhaustivePass())
+      .RegisterPass(spvtools::CreateEliminateDeadFunctionsPass())
+      .RegisterPass(spvtools::CreateAggressiveDCEPass())
+      .RegisterPass(spvtools::CreatePrivateToLocalPass())
+      .RegisterPass(spvtools::CreateLocalSingleBlockLoadStoreElimPass())
+      .RegisterPass(spvtools::CreateLocalSingleStoreElimPass())
+      .RegisterPass(spvtools::CreateAggressiveDCEPass())
+      .RegisterPass(spvtools::CreateScalarReplacementPass(0))
+      .RegisterPass(spvtools::CreateLocalAccessChainConvertPass())
+      .RegisterPass(spvtools::CreateLocalSingleBlockLoadStoreElimPass())
+      .RegisterPass(spvtools::CreateLocalSingleStoreElimPass())
+      .RegisterPass(spvtools::CreateAggressiveDCEPass())
+      .RegisterPass(spvtools::CreateLocalMultiStoreElimPass())
+      .RegisterPass(spvtools::CreateAggressiveDCEPass())
+      .RegisterPass(spvtools::CreateCCPPass())
+      .RegisterPass(spvtools::CreateAggressiveDCEPass())
+      .RegisterPass(spvtools::CreateLoopUnrollPass(true))
+      .RegisterPass(spvtools::CreateDeadBranchElimPass())
+      .RegisterPass(spvtools::CreateRedundancyEliminationPass())
+      .RegisterPass(spvtools::CreateCombineAccessChainsPass())
+      .RegisterPass(spvtools::CreateSimplificationPass())
+      .RegisterPass(spvtools::CreateScalarReplacementPass(0))
+      .RegisterPass(spvtools::CreateLocalAccessChainConvertPass())
+      .RegisterPass(spvtools::CreateLocalSingleBlockLoadStoreElimPass())
+      .RegisterPass(spvtools::CreateLocalSingleStoreElimPass())
+      .RegisterPass(spvtools::CreateAggressiveDCEPass())
+      .RegisterPass(spvtools::CreateSSARewritePass())
+      .RegisterPass(spvtools::CreateAggressiveDCEPass())
+      .RegisterPass(spvtools::CreateVectorDCEPass())
+      .RegisterPass(spvtools::CreateDeadInsertElimPass())
+      .RegisterPass(spvtools::CreateDeadBranchElimPass())
+      .RegisterPass(spvtools::CreateSimplificationPass())
+      .RegisterPass(spvtools::CreateIfConversionPass())
+      .RegisterPass(spvtools::CreateCopyPropagateArraysPass())
+      .RegisterPass(spvtools::CreateReduceLoadSizePass())
+      .RegisterPass(spvtools::CreateAggressiveDCEPass())
+      .RegisterPass(spvtools::CreateRedundancyEliminationPass())
+      .RegisterPass(spvtools::CreateDeadBranchElimPass())
+      .RegisterPass(spvtools::CreateSimplificationPass());
+}
+
+}  // namespace
 
 SPIRVCompiler::SPIRVCompiler(const SourceOptions& options,
                              std::shared_ptr<const fml::Mapping> sources)
@@ -21,7 +87,8 @@ SPIRVCompiler::~SPIRVCompiler() = default;
 
 std::shared_ptr<fml::Mapping> SPIRVCompiler::CompileToSPV(
     std::stringstream& stream,
-    const shaderc::CompileOptions& spirv_options) const {
+    const shaderc::CompileOptions& spirv_options,
+    bool optimize_without_block_merging) const {
   if (!sources_ || sources_->GetMapping() == nullptr) {
     COMPILER_ERROR(stream) << "Invalid sources for SPIRV Compiler.";
     return nullptr;
@@ -72,6 +139,38 @@ std::shared_ptr<fml::Mapping> SPIRVCompiler::CompileToSPV(
   if (!result) {
     COMPILER_ERROR(stream) << "Could not fetch SPIRV from compile job.";
     return nullptr;
+  }
+
+  if (optimize_without_block_merging) {
+    // Built-in GLES shaders are compiled with Vulkan semantics; only runtime
+    // stages use the OpenGL environment. Both are set in Compiler's target
+    // platform switch.
+    const spv_target_env target_env =
+        (options_.target_platform == TargetPlatform::kRuntimeStageGLES ||
+         options_.target_platform == TargetPlatform::kRuntimeStageGLES3)
+            ? SPV_ENV_OPENGL_4_5
+            : SPV_ENV_VULKAN_1_1;
+
+    spvtools::Optimizer optimizer(target_env);
+    optimizer.SetMessageConsumer([&stream](spv_message_level_t level,
+                                           const char*, const spv_position_t&,
+                                           const char* message) {
+      if (level <= SPV_MSG_ERROR) {
+        COMPILER_ERROR_NO_PREFIX(stream) << "SPIRV optimizer: " << message;
+      }
+    });
+    RegisterPerformancePassesWithoutBlockMerging(optimizer);
+
+    std::vector<uint32_t> optimized;
+    if (!optimizer.Run(result->cbegin(), result->cend() - result->cbegin(),
+                       &optimized)) {
+      COMPILER_ERROR(stream) << "Failed to optimize SPIRV.";
+      return nullptr;
+    }
+
+    const auto* bytes = reinterpret_cast<const uint8_t*>(optimized.data());
+    return std::make_shared<fml::DataMapping>(std::vector<uint8_t>(
+        bytes, bytes + optimized.size() * sizeof(uint32_t)));
   }
 
   const auto data_length = (result->cend() - result->cbegin()) *
@@ -285,7 +384,12 @@ shaderc::CompileOptions SPIRVCompilerOptions::BuildShadercOptions() const {
   options.SetAutoMapLocations(true);
   options.SetPreserveBindings(true);
 
-  options.SetOptimizationLevel(optimization_level);
+  // The pass list is applied after compilation instead, so shaderc must leave
+  // the module alone.
+  options.SetOptimizationLevel(
+      optimize_without_block_merging
+          ? shaderc_optimization_level::shaderc_optimization_level_zero
+          : optimization_level);
 
   if (generate_debug_info) {
     options.SetGenerateDebugInfo();

@@ -472,6 +472,14 @@ Compiler::Compiler(const std::shared_ptr<const fml::Mapping>& source_mapping,
         spirv_options.macro_definitions.push_back("IMPELLER_GRAPHICS_BACKEND");
         spirv_options.relaxed_vulkan_rules = true;
       }
+
+      // Block merging rewrites loops into a form that Vivante's shader
+      // compiler segfaults on while linking; see spirv_compiler.cc. The rest
+      // of the performance passes still run.
+      if (source_options.target_platform == TargetPlatform::kOpenGLES) {
+        spirv_options.optimize_without_block_merging = true;
+      }
+
       spirv_options.target = target;
     } break;
     case TargetPlatform::kRuntimeStageMetal:
@@ -493,6 +501,9 @@ Compiler::Compiler(const std::shared_ptr<const fml::Mapping>& source_mapping,
         // Flutter <= 3.44 before the OpenGLES flip was removed.
         spirv_options.macro_definitions.push_back(
             "IMPELLER_OPENGLES_UNFLIPPED_DEPRECATED");
+        // User fragment programs reach the same Vivante link crash as the
+        // built-in GLES shaders; see the kOpenGLES case above.
+        spirv_options.optimize_without_block_merging = true;
       }
     } break;
     case TargetPlatform::kSkSL: {
@@ -533,8 +544,10 @@ Compiler::Compiler(const std::shared_ptr<const fml::Mapping>& source_mapping,
   // SPIRV Generation.
   SPIRVCompiler spv_compiler(source_options, source_mapping);
 
-  spirv_assembly_ = spv_compiler.CompileToSPV(
-      error_stream_, spirv_options.BuildShadercOptions());
+  spirv_assembly_ =
+      spv_compiler.CompileToSPV(error_stream_,
+                                spirv_options.BuildShadercOptions(),
+                                spirv_options.optimize_without_block_merging);
 
   if (!spirv_assembly_) {
     return;
@@ -595,7 +608,8 @@ Compiler::Compiler(const std::shared_ptr<const fml::Mapping>& source_mapping,
     auto stripped_spirv_options = spirv_options;
     stripped_spirv_options.generate_debug_info = false;
     sl_mapping_ = spv_compiler.CompileToSPV(
-        error_stream_, stripped_spirv_options.BuildShadercOptions());
+        error_stream_, stripped_spirv_options.BuildShadercOptions(),
+        stripped_spirv_options.optimize_without_block_merging);
   } else {
     sl_mapping_ = sl_compilation_result;
   }

@@ -45,7 +45,9 @@ namespace {
 
 fml::jni::ScopedJavaGlobalRef<jclass>* g_flutter_jni_class = nullptr;
 
-// Workaround for crashes in Vivante GL driver on Android.
+// Vivante's Vulkan driver crashes while creating graphics pipelines, so these
+// devices are held to the GLES backend. The GL driver's own shader compiler
+// crash is avoided in impeller/compiler/spirv_compiler.cc.
 //
 // See:
 //   * https://github.com/flutter/flutter/issues/167850
@@ -292,8 +294,11 @@ AndroidRenderingAPI FlutterMain::SelectedRenderingAPI(
 #endif
 
   if (settings.enable_impeller &&
-      api_level >= kMinimumAndroidApiLevelForImpeller && !IsVivante()) {
-    return AndroidRenderingAPI::kImpellerAutoselect;
+      api_level >= kMinimumAndroidApiLevelForImpeller) {
+    // Vivante's Vulkan driver crashes while creating graphics pipelines, so
+    // these devices are kept on GLES rather than being autoselected.
+    return IsVivante() ? AndroidRenderingAPI::kImpellerOpenGLES
+                       : AndroidRenderingAPI::kImpellerAutoselect;
   }
 
   return AndroidRenderingAPI::kSkiaOpenGLES;
