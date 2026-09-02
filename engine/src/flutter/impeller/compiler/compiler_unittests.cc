@@ -182,9 +182,9 @@ TEST(CompilerTest, YFlipInjectionForGLESVertexShaders) {
 TEST(CompilerTest, GLESLoopsKeepTheirIncrementClause) {
   // The Vivante GLES compiler segfaults while linking a loop that SPIRV-Cross
   // emits as `for (int i = 0; i < 5; ) { ...; i++; continue; }`, which is what
-  // it produces once the optimizer sinks loop-carried phi merges into the
-  // SPIR-V continue block. GLES shaders are therefore built unoptimized; this
-  // guards that. See flutter/flutter#167850.
+  // it produces once spirv-opt's block merge pass folds the loop's continue
+  // block into its predecessor. GLES shaders skip that pass; this guards that.
+  // See flutter/flutter#167850.
   auto compile = [](TargetPlatform platform) -> std::string {
     std::shared_ptr<fml::Mapping> fixture =
         flutter::testing::OpenFixtureAsMapping("loop_continue.frag");

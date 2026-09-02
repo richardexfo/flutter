@@ -26,6 +26,9 @@ impeller_component("utilities") {
 impeller_component("compiler_lib") {
   include_dirs = [ "//flutter/third_party/vulkan-deps/spirv-cross/src/" ]
 
+  configs +=
+      [ "//flutter/third_party/vulkan-deps/spirv-tools/src:spvtools_public_config" ]
+
   # Current versions of libcxx have deprecated some of the UTF-16 string
   # conversion APIs.
   defines = [ "_LIBCPP_DISABLE_DEPRECATION_WARNINGS" ]
@@ -78,6 +81,9 @@ impeller_component("compiler_lib") {
     "//third_party/inja",
     "//third_party/shaderc_flutter",
     "//third_party/spirv_cross_flutter",
+
+    # For the SPIR-V pass list run in spirv_compiler.cc.
+    "//flutter/third_party/vulkan-deps/spirv-tools/src:spvtools_opt",
   ]
 }
 
